@@ -1,0 +1,160 @@
+name: "cd"
+on:
+  workflow_run:
+    workflows:
+      - "ci"
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# don't let two deploys run at the same time
+concurrency:
+  group: cd
+  cancel-in-progress: false
+
+env:
+  # the commit CI tested (or the current one for a manual run), also used as the image tag
+  GIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  terraform:
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    outputs:
+      ingress_ip: ${{ steps.get_ingress_ip.outputs.ingress_ip }}
+    env:
+      TF_VAR_project: "gd-gcp-internship-devops"
+      TF_VAR_region: "us-central1"
+      TF_VAR_dockerhub_user: ${{ secrets.DOCKERHUB_USERNAME }}
+      TF_VAR_dockerhub_pass: ${{ secrets.DOCKERHUB_TOKEN }}
+      TF_VAR_jwt_access_secret: ${{ secrets.JWT_ACCESS_SECRET }}
+      TF_VAR_jwt_refresh_secret: ${{ secrets.JWT_REFRESH_SECRET }}
+      TF_VAR_salt: ${{ secrets.SALT }}
+      TF_VAR_jwt_access_expires_in: "1h"
+      TF_VAR_jwt_refresh_expires_in: "14d"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GIT_SHA }}
+
+      - name: auth with User Credentials (ADC)
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          echo "$GCP_SA_KEY" > $RUNNER_TEMP/adc.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/adc.json" >> $GITHUB_ENV
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=$RUNNER_TEMP/adc.json" >> $GITHUB_ENV
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.17.0
+
+      - name: terraform init
+        working-directory: ./terraform
+        run: terraform init
+
+      - name: terraform plan
+        working-directory: ./terraform
+        run: terraform plan -out=tfplan
+
+      - name: terraform apply
+        working-directory: ./terraform
+        run: terraform apply tfplan
+
+      - name: get_ingress_ip
+        id: get_ingress_ip
+        working-directory: ./terraform
+        run: echo "ingress_ip=$(terraform output -raw ingress_ip)" >> $GITHUB_OUTPUT
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: ["terraform"]
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GIT_SHA }}
+
+      - name: login to docker hub
+        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+
+      - name: build and push backend
+        run: |
+          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/apex:backend-$GIT_SHA ./backend
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/apex:backend-$GIT_SHA
+
+      - name: build and push frontend
+        run: |
+          docker build --build-arg VITE_API_URL=http://${{needs.terraform.outputs.ingress_ip}}/api -t ${{ secrets.DOCKERHUB_USERNAME }}/apex:frontend-$GIT_SHA ./frontend
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/apex:frontend-$GIT_SHA
+
+  kubernetes:
+    runs-on: ubuntu-latest
+    needs: ["docker", "terraform"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GIT_SHA }}
+
+      - name: auth with User Credentials (ADC)
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          echo "$GCP_SA_KEY" > $RUNNER_TEMP/adc.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/adc.json" >> $GITHUB_ENV
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=$RUNNER_TEMP/adc.json" >> $GITHUB_ENV
+
+      - uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: apex-gke-cluster
+          location: us-central1
+          project_id: gd-gcp-internship-devops
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.3.1
+
+      - name: add helm repos
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm repo update
+
+      - name: deploy monitoring
+        run: |
+          helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+          --version 92.11.0 \
+          --namespace apex-monitoring \
+          --set grafana.adminPassword=${{ secrets.GRAFANA_ADMIN_PASSWORD }} \
+          --set 'grafana.grafana\.ini.server.root_url=http://${{needs.terraform.outputs.ingress_ip}}/grafana/' \
+          --set 'grafana.grafana\.ini.server.serve_from_sub_path=true'
+
+          helm upgrade --install loki grafana/loki-stack \
+          --version 2.10.3 \
+          --namespace apex-monitoring \
+          --set promtail.enabled=true \
+          --set loki.isDefault=false
+
+      - name: deploy monitoring ingress
+        run: |
+          helm upgrade --install apex-monitoring ./k8s/apex-monitoring \
+          --namespace apex-monitoring
+
+      # --wait fails the job if the new pods don't become ready,
+      # --rollback-on-failure then puts the previous version back
+      - name: helm deploy
+        run: |
+          helm upgrade --install apex ./k8s/apex-app \
+           --namespace apex-app \
+           --set global.repository=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/apex \
+           --set backend.image.tag=backend-$GIT_SHA \
+           --set frontend.image.tag=frontend-$GIT_SHA \
+           --wait --rollback-on-failure --timeout 10m
+
+      - name: smoke test
+        run: curl --fail --retry 10 --retry-delay 10 --retry-all-errors http://${{needs.terraform.outputs.ingress_ip}}/

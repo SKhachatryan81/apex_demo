@@ -1,0 +1,18 @@
+global:
+  repository: "PENDING"
+backend:
+  image:
+    # CD sets this to backend-<git sha> so every deploy gets a new tag
+    tag: backend
+    pullPolicy: IfNotPresent
+  port: 5001
+  replicas: 2
+frontend:
+  image:
+    # CD sets this to frontend-<git sha>
+    tag: frontend
+    pullPolicy: IfNotPresent
+  port: 80
+  replicas: 2
+monitoring:
+  port: 9091

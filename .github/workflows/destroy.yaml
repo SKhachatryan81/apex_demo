@@ -1,0 +1,65 @@
+name: "destroy"
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to confirm that you want to destroy the infrastructure'
+        required: true
+
+permissions:
+  contents: read
+
+# same group as cd, so destroy can't run in the middle of a deploy
+concurrency:
+  group: cd
+  cancel-in-progress: false
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    env:
+      TF_VAR_project: "gd-gcp-internship-devops"
+      TF_VAR_region: "us-central1"
+      TF_VAR_dockerhub_user: ${{ secrets.DOCKERHUB_USERNAME }}
+      TF_VAR_dockerhub_pass: ${{ secrets.DOCKERHUB_TOKEN }}
+      TF_VAR_jwt_access_secret: ${{ secrets.JWT_ACCESS_SECRET }}
+      TF_VAR_jwt_refresh_secret: ${{ secrets.JWT_REFRESH_SECRET }}
+      TF_VAR_salt: ${{ secrets.SALT }}
+      TF_VAR_jwt_access_expires_in: "1h"
+      TF_VAR_jwt_refresh_expires_in: "14d"
+    steps:
+      - name: Guard agains accidental runs
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "destroy" ]; then
+            echo "Confirmation text did not match. Aborting"
+            exit 1
+          fi
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: auth with User Credentials (ADC)
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          echo "$GCP_SA_KEY" > $RUNNER_TEMP/adc.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/adc.json" >> $GITHUB_ENV
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=$RUNNER_TEMP/adc.json" >> $GITHUB_ENV
+
+      - name: setup terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.17.0
+
+      - name: terraform init
+        working-directory: ./terraform
+        run: terraform init
+
+      # Only the cluster is destroyed. The database has deletion_protection on,
+      # so it (and the network it needs) stays and the data survives.
+      - name: terraform destroy
+        working-directory: ./terraform
+        run: |
+          terraform destroy -auto-approve \
+            -target=module.cluster \
+            -target=module.helm_app \
+            -target=module.helm_monitoring

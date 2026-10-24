@@ -1,0 +1,47 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+    name: {{ .Release.Name }}-migrate-job
+    namespace: {{ .Release.Namespace }}
+    annotations:
+        "helm.sh/hook": pre-upgrade,pre-install
+        "helm.sh/hook-weight": "0"
+        "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+    backoffLimit: 2
+    template: 
+        spec:
+            restartPolicy: Never
+            imagePullSecrets:
+                - name: dockerhub-creds
+            containers:
+                - name: migrate
+                  image: "{{ .Values.global.repository }}:{{ .Values.backend.image.tag }}"
+                  imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+                  command: ["npm", "run", "migrate"]
+                  env:
+                    - name: DB_HOST
+                      valueFrom:
+                        secretKeyRef:
+                            name: db-creds
+                            key: host
+                    - name: DB_NAME
+                      valueFrom:
+                        secretKeyRef:
+                            name: db-creds
+                            key: name
+                    - name: DB_USER
+                      valueFrom:
+                        secretKeyRef:
+                            name: db-creds
+                            key: user
+                    - name: DB_PASS
+                      valueFrom:
+                        secretKeyRef:
+                            name: db-creds
+                            key: password
+                    - name: DB_PORT
+                      valueFrom:
+                        secretKeyRef:
+                            name: db-creds
+                            key: port

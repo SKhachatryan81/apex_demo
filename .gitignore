@@ -1,0 +1,27 @@
+node_modules/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfstate.d/
+*.tfplan
+crash.log
+terraform/terraform.tfvars
+
+# Secrets
+**/.env
+adc.json
+
+# Build outputs
+dist/
+build/
+coverage/
+
+# Logs
+*.log
+
+/memory
+
+changes.md
+.vscode

@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: {{ .Release.Name }}-front-deployment
+    namespace: {{ .Release.Namespace }}
+    labels: 
+        workload: frontend
+spec: 
+    replicas: {{ .Values.frontend.replicas }}
+    selector: 
+        matchLabels:
+            workload: frontend
+    template:
+        metadata:
+            labels:
+                workload: frontend
+        spec:
+            nodeSelector:
+                workload: "app"
+            imagePullSecrets:
+                - name: dockerhub-creds
+            containers: 
+                - name: apex-frontend
+                  image: "{{ .Values.global.repository }}:{{ .Values.frontend.image.tag }}"
+                  imagePullPolicy: {{ .Values.frontend.image.pullPolicy }}
+                  ports: 
+                    - name: http
+                      containerPort: {{ .Values.frontend.port }}
+                  resources:
+                    requests:
+                      cpu: 50m
+                      memory: 32Mi
+                    limits:
+                      memory: 64Mi
+                  readinessProbe:
+                    httpGet:
+                        path: /
+                        port: http
+                  livenessProbe:
+                    tcpSocket:
+                        port: http

@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+    name: {{ .Release.Name }}-frontend-svc
+    namespace: {{ .Release.Namespace }}
+    labels:
+        workload: frontend
+spec:
+    type: ClusterIP
+    ports:
+        - port: 80
+          targetPort: {{ .Values.frontend.port }}
+          protocol: TCP
+    selector:
+        workload: frontend
